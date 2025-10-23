@@ -1,0 +1,53 @@
+@startuml
+' Component diagram for event bus usage
+skinparam componentStyle rectangle
+
+title Event Bus Component Overview
+
+package "Application Core" {
+  [EventBusApplication] <<Spring Boot>>
+  [EventBusScheduler]
+  [WorkerRegistry]
+}
+
+component "FtpDownloadProducer" as Producer
+component "CsvProcessorConsumer" as Consumer
+component "EventBusService" as EventBusService
+component "IdempotencyService" as IdempotencyService
+component "MetricsService" as MetricsService
+
+rectangle "Persistence" {
+  database "WorkersEventRepository" as WorkersEventRepo
+  database "EventConsumptionRepository" as EventConsumptionRepo
+  database "EventMetricsRepository" as EventMetricsRepo
+  database "SystemWorkerRepository" as SystemWorkerRepo
+}
+
+EventBusApplication --> Producer : configure & start
+EventBusApplication --> Consumer : configure & start
+EventBusApplication --> WorkerRegistry : register workers
+
+Producer --> EventBusService : publish events
+Consumer --> EventBusService : acknowledge outcomes
+
+EventBusScheduler --> WorkerRegistry : fetch registered consumers
+EventBusScheduler --> EventBusService : poll & update events
+EventBusScheduler --> IdempotencyService : hash results
+
+WorkerRegistry --> SystemWorkerRepo : persist metadata
+
+EventBusService --> WorkersEventRepo : persist events
+EventBusService --> EventConsumptionRepo : track consumption
+EventBusService --> SystemWorkerRepo : resolve worker ids
+EventBusService --> MetricsService : report outcomes
+
+IdempotencyService --> EventConsumptionRepo : check & record
+
+MetricsService --> EventMetricsRepo : aggregate metrics
+MetricsService --> SystemWorkerRepo : lookup workers
+
+Producer ..> IdempotencyService : optional checks <<future>>
+Consumer ..> IdempotencyService : ensure idempotent processing
+Consumer ..> MetricsService : (via EventBusService)
+
+@enduml

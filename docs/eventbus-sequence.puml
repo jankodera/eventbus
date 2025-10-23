@@ -1,0 +1,65 @@
+@startuml
+' Sequence diagram illustrating event publishing and consumption
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+
+autonumber
+participant Producer as "FtpDownloadProducer"
+participant Bus as "EventBusService"
+database EventRepo as "WorkersEventRepository"
+participant Scheduler as "EventBusScheduler"
+participant Registry as "WorkerRegistry"
+participant Consumer as "CsvProcessorConsumer"
+participant Idempotency as "IdempotencyService"
+database ConsumptionRepo as "EventConsumptionRepository"
+participant Metrics as "MetricsService"
+database MetricsRepo as "EventMetricsRepository"
+
+== Event publication ==
+Producer -> Producer : triggerDirectoryScan()
+Producer -> Bus : publishEvent(eventType, fileData)
+Bus -> EventRepo : save(event {status=PENDING})
+Bus --> Producer : eventUuid
+
+== Consumer discovery & polling ==
+Scheduler -> Registry : getAllConsumers()
+Registry --> Scheduler : registered consumers
+loop for each consumer and event type
+    Scheduler -> Bus : pollPendingEvents(eventType, limit)
+    Bus --> Scheduler : pending events
+    loop for each event
+        Scheduler -> Bus : markEventProcessing(eventUuid, consumerId)
+        alt accepted for processing
+            Bus -> ConsumptionRepo : upsert consumption record
+            Bus --> Scheduler : true
+            Scheduler -> Consumer : consume(event)
+            Consumer -> Idempotency : generateIdempotencyKey(eventUuid, consumerId)
+            Consumer -> Idempotency : isAlreadyProcessed(key)?
+            alt not processed yet
+                Consumer -> Consumer : processEvent(event)
+                Consumer -> Idempotency : recordProcessing(key, resultHash)
+                Consumer --> Scheduler : ConsumptionResult(success, resultData)
+                Scheduler -> Idempotency : calculateResultHash(resultData)
+                Idempotency --> Scheduler : resultHash
+                Scheduler -> Bus : markEventSuccess(eventUuid, consumerId, resultHash)
+                Bus -> EventRepo : update status SUCCESS
+                Bus -> ConsumptionRepo : mark SUCCESS
+                Bus -> Metrics : recordEventProcessed(eventType, consumerId, SUCCESS, duration)
+                Metrics -> MetricsRepo : update daily aggregates
+            else already processed
+                Consumer --> Scheduler : ConsumptionResult(success, "Already processed")
+                Scheduler -> Idempotency : calculateResultHash("Already processed")
+                Idempotency --> Scheduler : resultHash
+                Scheduler -> Bus : markEventSuccess(eventUuid, consumerId, resultHash)
+                Bus -> EventRepo : update status SUCCESS
+                Bus -> ConsumptionRepo : mark SUCCESS
+                Bus -> Metrics : recordEventProcessed(eventType, consumerId, SUCCESS, duration)
+                Metrics -> MetricsRepo : update daily aggregates
+            end
+        else already claimed or invalid
+            Bus --> Scheduler : false
+        end
+    end
+end
+
+@enduml
